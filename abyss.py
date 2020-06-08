@@ -1,20 +1,25 @@
 import ida_kernwin as kw
 import ida_hexrays as hr
 import ida_diskio, ida_idaapi
-import os, sys
+import os, sys, configparser
 
 __author__ = "https://github.com/patois"
 
 PLUGIN_NAME = "abyss"
-ACTION_NAME = PLUGIN_NAME+":"
-POPUP_ENTRY = PLUGIN_NAME+"/"
-FILTER_DIR = PLUGIN_NAME+"_filters"
+ACTION_NAME = "%s:" % PLUGIN_NAME
+POPUP_ENTRY = "%s/" % PLUGIN_NAME
+FILTER_DIR = "%s_filters" % PLUGIN_NAME
+CFG_FILENAME = "%s.cfg" % PLUGIN_NAME
+
 FILTERS = {}
 
 # ----------------------------------------------------------------------------
 class abyss_filter_t:
+    """every filter should inherit from this class and
+    override respective handlers/methods"""
+ 
     def __init__(self):
-        self.activated = False
+        self.set_activated(False)
         return
 
     def process_printfunc(self, cfunc, printer):
@@ -26,11 +31,55 @@ class abyss_filter_t:
     def process_curpos(self, vu):
         return 0
 
-    def _is_activated(self):
+    def is_activated(self):
         return self.activated
 
-    def _set_activated(self, active):
+    def set_activated(self, active):
         self.activated = active
+
+# ----------------------------------------------------------------------------
+def get_cfg_filename():
+    """returns full path for config file."""
+    return os.path.join(
+        ida_diskio.get_user_idadir(),
+        "plugins",
+        "%s" % CFG_FILENAME)
+
+# ----------------------------------------------------------------------------
+def apply_cfg(reload=False, filters={}):
+    """loads abyss configuration."""
+
+    cfg_file = get_cfg_filename()
+    kw.msg("%s: %sloading %s...\n" % (PLUGIN_NAME,
+        "re" if reload else "",
+        cfg_file))
+    if not os.path.isfile(cfg_file):
+        kw.msg("%s: default configuration (%s) does not exist!\n" % (PLUGIN_NAME, cfg_file))
+        kw.msg("Creating default configuration\n")
+        try:
+            with open(cfg_file, "w") as f:
+                f.write("[init]\n")
+                for name, mod in filters.items():
+                    f.write("%s=False\n" % name )
+        except:
+            kw.msg("failed!\n")
+            return False
+        return apply_cfg(reload=True)
+
+    config = configparser.RawConfigParser()
+    config.readfp(open(cfg_file))
+
+    # read all sections
+    for section in config.sections():
+        if section == "init":
+            for name, value in config.items(section):
+                try:
+                    filters[name].set_activated(config[section].getboolean(name))
+                    #print("%s -> %s" % (name, value))
+                except:
+                    pass
+    kw.msg("done!\n")
+    return True
 
 # ----------------------------------------------------------------------------
 def load_filters(reload=False):
@@ -53,6 +102,7 @@ def load_filters(reload=False):
                             FILTERS[mod] = flt
                     except ModuleNotFoundError:
                         print("  failed: \"%s\"" % (mod))
+        apply_cfg(reload, FILTERS)
     return
 
 # ----------------------------------------------------------------------------
@@ -66,10 +116,10 @@ class ui_event_t(kw.UI_Hooks):
 
                     def activate(self, ctx):
                         obj = FILTERS[self.name]
-                        obj._set_activated(not obj._is_activated())
+                        obj.set_activated(not obj.is_activated())
                         vu = hr.get_widget_vdui(ctx.widget)
                         if vu:
-                            vu.refresh_view(not obj._is_activated())
+                            vu.refresh_view(not obj.is_activated())
                         return 1
 
                     def update(self, ctx):
@@ -82,7 +132,7 @@ class ui_event_t(kw.UI_Hooks):
                         FilterHandler(name),
                         None,
                         None,
-                        34 if obj._is_activated() else -1)
+                        34 if obj.is_activated() else -1)
                     kw.attach_dynamic_action_to_popup(widget, popup_handle, action_desc, POPUP_ENTRY)
 
 # ----------------------------------------------------------------------------
@@ -92,19 +142,19 @@ class hx_event_t(hr.Hexrays_Hooks):
 
     def print_func(self, cfunc, printer):
         for name, obj in FILTERS.items():
-            if obj._is_activated():
+            if obj.is_activated():
                 obj.process_printfunc(cfunc, printer)
         return 0
 
     def text_ready(self, vu):
         for name, obj in FILTERS.items():
-            if obj._is_activated():
+            if obj.is_activated():
                 obj.process_text(vu)
         return 0
 
     def curpos(self, vu):
         for name, obj in FILTERS.items():
-            if obj._is_activated():
+            if obj.is_activated():
                 obj.process_curpos(vu)
         return 0
         
@@ -114,6 +164,7 @@ class abyss_plugin_t(ida_idaapi.plugin_t):
     comment = "Postprocess Hexrays Output"
     help = comment
     wanted_name = PLUGIN_NAME
+    # allows reloading filter scripts while developing them
     wanted_hotkey = "Ctrl-Alt-R"
 
     def init(self):
@@ -129,6 +180,7 @@ class abyss_plugin_t(ida_idaapi.plugin_t):
 
     def run(self, arg):
         load_filters(reload=True)
+        return
 
     def term(self):
         try:
@@ -136,6 +188,7 @@ class abyss_plugin_t(ida_idaapi.plugin_t):
             self.hr_hooks.unhook()
         except:
             pass
+        return
 
 def PLUGIN_ENTRY():
     return abyss_plugin_t()
